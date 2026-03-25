@@ -7,20 +7,23 @@ import (
 	"time"
 
 	"github.com/darkiz/publictransporttracker/internal/store"
+	"github.com/darkiz/publictransporttracker/internal/vehicle"
 )
 
 // Server is the HTTP/WebSocket API server.
 type Server struct {
-	store  *store.Store
-	mux    *http.ServeMux
-	server *http.Server
+	store    *store.Store
+	vehicles vehicle.StateManager
+	mux      *http.ServeMux
+	server   *http.Server
 }
 
 // New creates a new API server.
-func New(s *store.Store, addr string) *Server {
+func New(s *store.Store, vehicles vehicle.StateManager, addr string) *Server {
 	srv := &Server{
-		store: s,
-		mux:   http.NewServeMux(),
+		store:    s,
+		vehicles: vehicles,
+		mux:      http.NewServeMux(),
 	}
 	srv.routes()
 	srv.server = &http.Server{
@@ -42,6 +45,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/shapes", s.handleGetAllShapes)
 	s.mux.HandleFunc("GET /api/stops", s.handleListStops)
 	s.mux.HandleFunc("GET /api/trips/{tripID}/stop-times", s.handleGetTripStopTimes)
+	s.mux.HandleFunc("GET /api/vehicles", s.handleListVehicles)
 }
 
 // Start begins listening for HTTP connections.

@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/darkiz/publictransporttracker/internal/api"
 	"github.com/darkiz/publictransporttracker/internal/gtfs"
+	"github.com/darkiz/publictransporttracker/internal/realtime"
 	"github.com/darkiz/publictransporttracker/internal/store"
+	"github.com/darkiz/publictransporttracker/internal/vehicle"
 )
 
 func main() {
@@ -48,9 +51,11 @@ func main() {
 	case "serve":
 		serveCmd := flag.NewFlagSet("serve", flag.ExitOnError)
 		addr := serveCmd.String("addr", ":8080", "HTTP listen address")
+		feedURL := serveCmd.String("feed-url", "", "GTFS-RT VehiclePositions feed URL")
+		pollInterval := serveCmd.Int("poll-interval", 15, "Feed poll interval in seconds")
 		serveCmd.Parse(os.Args[2:])
 
-		if err := runServe(dsn, *addr); err != nil {
+		if err := runServe(dsn, *addr, *feedURL, *pollInterval); err != nil {
 			slog.Error("server failed", "error", err)
 			os.Exit(1)
 		}
@@ -64,9 +69,14 @@ func printUsage() {
 	fmt.Fprintln(os.Stderr, `Usage: tracker <command> [flags]
 
 Commands:
-  migrate               Run database migrations
-  import --gtfs <file>  Import GTFS static data from a ZIP file
-  serve  --addr <addr>  Start the API server (default :8080)
+  migrate                      Run database migrations
+  import --gtfs <file>         Import GTFS static data from a ZIP file
+  serve  [flags]               Start the API server
+
+Serve flags:
+  --addr <addr>                HTTP listen address (default :8080)
+  --feed-url <url>             GTFS-RT VehiclePositions feed URL
+  --poll-interval <seconds>    Feed poll interval (default 15)
 
 Environment:
   DATABASE_URL  PostgreSQL connection string
@@ -97,7 +107,6 @@ func runImport(dsn string, gtfsPath string) error {
 	}
 	defer s.Close()
 
-	// Ensure schema exists.
 	if err := s.Migrate(context.Background()); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}
@@ -106,23 +115,65 @@ func runImport(dsn string, gtfsPath string) error {
 	return imp.Import(context.Background(), gtfsPath)
 }
 
-func runServe(dsn string, addr string) error {
+func runServe(dsn string, addr string, feedURL string, pollIntervalSec int) error {
 	s, err := store.New(dsn)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
 
-	// Ensure schema exists.
 	if err := s.Migrate(context.Background()); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}
 
-	srv := api.New(s, addr)
+	// Build the real-time pipeline.
+	snapper := vehicle.NewInMemorySnapper()
+	stateMgr := vehicle.NewDefaultStateManager(
+		func() vehicle.PositionFilter { return vehicle.NewKalmanFilter() },
+		snapper,
+	)
+
+	srv := api.New(s, stateMgr, addr)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// Start GTFS-RT poller if feed URL is configured.
+	if feedURL != "" {
+		fetcher := realtime.NewHTTPFetcher()
+		decoder := &realtime.ProtoDecoder{}
+		handler := func(updates []vehicle.RawUpdate) {
+			for _, u := range updates {
+				stateMgr.Update(u)
+			}
+		}
+		poller := realtime.NewPoller(fetcher, decoder, handler)
+
+		interval := time.Duration(pollIntervalSec) * time.Second
+		go poller.Run(ctx, feedURL, interval)
+
+		// Periodically prune stale vehicles.
+		go func() {
+			ticker := time.NewTicker(1 * time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					pruned := stateMgr.Prune(time.Now().Add(-5 * time.Minute))
+					if pruned > 0 {
+						slog.Info("pruned stale vehicles", "count", pruned)
+					}
+				}
+			}
+		}()
+
+		slog.Info("real-time pipeline enabled", "feed_url", feedURL, "poll_interval", interval)
+	} else {
+		slog.Warn("no --feed-url specified, real-time pipeline disabled")
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

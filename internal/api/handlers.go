@@ -112,6 +112,15 @@ func (s *Server) handleGetTripStopTimes(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, stopTimes)
 }
 
+func (s *Server) handleListVehicles(w http.ResponseWriter, r *http.Request) {
+	if s.vehicles == nil {
+		writeJSON(w, []any{})
+		return
+	}
+
+	writeJSON(w, s.vehicles.All())
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
