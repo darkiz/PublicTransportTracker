@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/darkiz/publictransporttracker/internal/api"
+	"github.com/darkiz/publictransporttracker/internal/broadcast"
 	"github.com/darkiz/publictransporttracker/internal/gtfs"
 	"github.com/darkiz/publictransporttracker/internal/realtime"
 	"github.com/darkiz/publictransporttracker/internal/store"
@@ -133,7 +134,8 @@ func runServe(dsn string, addr string, feedURL string, pollIntervalSec int) erro
 		snapper,
 	)
 
-	srv := api.New(s, stateMgr, addr)
+	hub := broadcast.NewHub()
+	srv := api.New(s, stateMgr, hub, addr)
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -174,6 +176,38 @@ func runServe(dsn string, addr string, feedURL string, pollIntervalSec int) erro
 	} else {
 		slog.Warn("no --feed-url specified, real-time pipeline disabled")
 	}
+
+	// Broadcast loop: periodically push delta-compressed state to WebSocket clients.
+	go func() {
+		deltaEnc := broadcast.NewDeltaEncoder()
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if hub.ClientCount() == 0 {
+					continue
+				}
+				// Build current state and compute delta.
+				all := stateMgr.All()
+				updates := make([]broadcast.VehicleUpdate, len(all))
+				for i, s := range all {
+					updates[i] = broadcast.StateToUpdate(s)
+				}
+				delta := deltaEnc.Encode(updates)
+				if len(delta) == 0 {
+					continue
+				}
+				hub.Broadcast(broadcast.Envelope{
+					Type:     "update",
+					Vehicles: delta,
+				})
+			}
+		}
+	}()
 
 	errCh := make(chan error, 1)
 	go func() {

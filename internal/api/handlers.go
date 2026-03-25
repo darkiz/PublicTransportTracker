@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+
+	"github.com/darkiz/publictransporttracker/internal/broadcast"
 )
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -119,6 +121,14 @@ func (s *Server) handleListVehicles(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, s.vehicles.All())
+}
+
+func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	if s.hub == nil {
+		http.Error(w, "websocket not available", http.StatusServiceUnavailable)
+		return
+	}
+	broadcast.HandleWebSocket(w, r, s.hub)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

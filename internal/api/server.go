@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/darkiz/publictransporttracker/internal/broadcast"
 	"github.com/darkiz/publictransporttracker/internal/store"
 	"github.com/darkiz/publictransporttracker/internal/vehicle"
 )
@@ -14,15 +15,17 @@ import (
 type Server struct {
 	store    *store.Store
 	vehicles vehicle.StateManager
+	hub      *broadcast.Hub
 	mux      *http.ServeMux
 	server   *http.Server
 }
 
 // New creates a new API server.
-func New(s *store.Store, vehicles vehicle.StateManager, addr string) *Server {
+func New(s *store.Store, vehicles vehicle.StateManager, hub *broadcast.Hub, addr string) *Server {
 	srv := &Server{
 		store:    s,
 		vehicles: vehicles,
+		hub:      hub,
 		mux:      http.NewServeMux(),
 	}
 	srv.routes()
@@ -46,6 +49,12 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/stops", s.handleListStops)
 	s.mux.HandleFunc("GET /api/trips/{tripID}/stop-times", s.handleGetTripStopTimes)
 	s.mux.HandleFunc("GET /api/vehicles", s.handleListVehicles)
+	s.mux.HandleFunc("/ws", s.handleWebSocket)
+}
+
+// Hub returns the broadcast hub for external use (e.g., broadcast loop).
+func (s *Server) Hub() *broadcast.Hub {
+	return s.hub
 }
 
 // Start begins listening for HTTP connections.
